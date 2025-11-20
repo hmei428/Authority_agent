@@ -1,0 +1,6 @@
+pandas
+requests
+tqdm
+pyarrow
+oss2
+openai

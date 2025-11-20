@@ -1,0 +1,28 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+
+# Virtualenv / environment
+venv/
+.env/
+.venv/
+.envrc
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Logs & local data
+logs/
+data/
+outputs/
+*.log
+
+# Notebooks / experiments (若不想入库可留着)
+1.ipynb
+
+

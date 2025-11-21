@@ -14,7 +14,7 @@ from typing import Dict, List
 import pandas as pd
 from tqdm import tqdm
 
-from search_agent.scoring import default_score_authority, default_score_relevance
+from search_agent.scoring_optimized import default_score_authority, default_score_relevance
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,25 +53,28 @@ def score_and_filter(
     authority_scores: Dict[str, int] = {}
 
     def score_host(host: str) -> tuple:
-        """对单个host打分"""
+        """对单个host打分，返回(host, score, reason)"""
         # 取该host的第一条记录的title和content作为样本
         sample = df[df["host"] == host].iloc[0]
         title = sample.get("title", "")
         content = sample.get("content", "")
 
         try:
-            score = default_score_authority(host, title, content)
-            return host, score
+            score, reason = default_score_authority(host, title, content)
+            return host, score, reason
         except Exception as e:
             logger.warning(f"Host {host} 打分失败: {e}")
-            return host, 0
+            return host, 0, ""
+
+    authority_reasons: Dict[str, str] = {}  # 存储判断依据
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(score_host, host): host for host in unique_hosts}
 
         for future in tqdm(as_completed(futures), total=len(futures), desc="权威性打分"):
-            host, score = future.result()
+            host, score, reason = future.result()
             authority_scores[host] = score
+            authority_reasons[host] = reason
 
     # 筛选权威host
     authority_hosts = {
@@ -91,17 +94,17 @@ def score_and_filter(
     qna_results: List[Dict] = []
 
     def score_relevance(row: pd.Series) -> tuple:
-        """对单条记录进行相关性打分"""
+        """对单条记录进行相关性打分，返回(row_dict, score, reason)"""
         query = row["query"]
         title = row.get("title", "")
         content = row.get("content", "")
 
         try:
-            score = default_score_relevance(query, title, content)
-            return row.to_dict(), score
+            score, reason = default_score_relevance(query, title, content)
+            return row.to_dict(), score, reason
         except Exception as e:
             logger.warning(f"相关性打分失败 (query={query}): {e}")
-            return row.to_dict(), -1
+            return row.to_dict(), -1, ""
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -110,11 +113,13 @@ def score_and_filter(
         }
 
         for future in tqdm(as_completed(futures), total=len(futures), desc="相关性打分"):
-            row_dict, rel_score = future.result()
+            row_dict, rel_score, rel_reason = future.result()
 
             if rel_score >= relevance_threshold:
                 host = row_dict["host"]
                 auth_score = authority_scores.get(host, 0)
+                auth_reason = authority_reasons.get(host, "")
+                search_engine = row_dict.get("search_engine", "")
 
                 qna_results.append({
                     "query": row_dict["query"],
@@ -122,8 +127,11 @@ def score_and_filter(
                     "title": row_dict.get("title", ""),
                     "content": row_dict.get("content", ""),
                     "host": host,
+                    "search_engine": search_engine,
                     "authority_score": auth_score,
+                    "authority_reason": auth_reason,
                     "relevance_score": rel_score,
+                    "relevance_reason": rel_reason,
                 })
 
     logger.info(f"高权威高相关记录数: {len(qna_results)}")

@@ -17,8 +17,9 @@ class MetaSearchClient:
         self.session.headers.update({"api-key": self.api_key})
 
     def search(self, query: str) -> List[Dict]:
+        search_engine = "search_pro_ms"
         data = {
-            "search_engine": "search_pro_ms",
+            "search_engine": search_engine,
             "search_query": query,
             "query_rewrite": "false",
             "request_id": self.request_id,
@@ -28,4 +29,11 @@ class MetaSearchClient:
         response.raise_for_status()
         payload = response.json()
         items: Iterable[Dict] = payload.get("search_result", []) or []
-        return list(items)
+
+        # 在每个结果中添加search_engine字段（如果API返回中没有的话）
+        results = []
+        for item in items:
+            if "search_engine" not in item:
+                item["search_engine"] = search_engine
+            results.append(item)
+        return results

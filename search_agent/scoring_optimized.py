@@ -150,10 +150,11 @@ def _make_cache_key(query: str, title: str, content: str) -> str:
     return hashlib.md5(combined.encode('utf-8')).hexdigest()
 
 
-def score_authority_cached(host: str, title: str = "", content: str = "") -> int:
+def score_authority_cached(host: str, title: str = "", content: str = "") -> tuple:
     """
     优化1：带缓存的权威性打分
-    调用 DirectLLM 对 Host 进行权威性 1-4 档位打分；失败时返回 0。
+    调用 DirectLLM 对 Host 进行权威性 1-4 档位打分；失败时返回 (0, "")。
+    返回 (score, reason) 其中 reason 是判断依据
     """
     # 检查缓存
     if host in _authority_cache:
@@ -163,7 +164,7 @@ def score_authority_cached(host: str, title: str = "", content: str = "") -> int
         client = _get_authority_client()
     except Exception as e:
         logger.error("创建权威性打分client失败: %s", str(e))
-        return 0
+        return (0, "")
 
     messages = [
         {"role": "system", "content": AUTHORITY_SYSTEM_PROMPT},
@@ -194,31 +195,35 @@ def score_authority_cached(host: str, title: str = "", content: str = "") -> int
                 logger.warning("权威性打分API返回空内容 (host=%s, 尝试=%d)", host, attempt)
                 if attempt >= MAX_RETRIES + 1:
                     logger.error("权威性打分失败 (host=%s, 已重试%d次): API返回空内容", host, MAX_RETRIES)
-                    return 0
+                    return (0, "")
                 time.sleep(RETRY_DELAY)
                 continue
 
             parsed = _parse_json_block(content_resp)
             score = int(parsed.get("标签", 0))
+            reason = parsed.get("判断依据", "")
             if score not in (1, 2, 3, 4):
                 score = 0
+                reason = ""
 
-            # 缓存结果
-            _authority_cache[host] = score
-            return score
+            # 缓存结果 (score, reason)
+            result = (score, reason)
+            _authority_cache[host] = result
+            return result
         except Exception as e:
             if attempt >= MAX_RETRIES + 1:
                 logger.error("权威性打分失败 (host=%s, 已重试%d次): %s", host, MAX_RETRIES, str(e))
-                return 0
+                return (0, "")
             time.sleep(RETRY_DELAY)
-    return 0
+    return (0, "")
 
 
-def score_relevance_cached(query: str, title: str, content: str) -> int:
+def score_relevance_cached(query: str, title: str, content: str) -> tuple:
     """
     优化1：带缓存的相关性打分
     调用 DirectLLM 对 Query-Title-Content 做相关性 0/1/2 打分。
-    返回 -1 表示无法判定/错误。
+    返回 (-1, "") 表示无法判定/错误。
+    返回 (score, reason) 其中 reason 是判断依据
     """
     # 检查缓存
     cache_key = _make_cache_key(query, title, content)
@@ -229,7 +234,7 @@ def score_relevance_cached(query: str, title: str, content: str) -> int:
         client = _get_relevance_client()
     except Exception as e:
         logger.error("创建相关性打分client失败: %s", str(e))
-        return -1
+        return (-1, "")
 
     relevance_user_prompt = (
         "请分析 Query 与网页的标题和内容的相关性，输出 0/1/2。\n"
@@ -268,39 +273,42 @@ def score_relevance_cached(query: str, title: str, content: str) -> int:
                 logger.warning("相关性打分API返回空内容 (query=%s, 尝试=%d)", query[:50], attempt)
                 if attempt >= MAX_RETRIES + 1:
                     logger.error("相关性打分失败 (query=%s, 已重试%d次): API返回空内容", query[:50], MAX_RETRIES)
-                    return -1
+                    return (-1, "")
                 time.sleep(RETRY_DELAY)
                 continue
 
             parsed = _parse_json_block(content_resp)
             score = int(parsed.get("标签", -1))
+            reason = parsed.get("判断依据", "")
             if score not in (0, 1, 2):
                 score = -1
+                reason = ""
 
-            # 缓存结果
-            _relevance_cache[cache_key] = score
-            return score
+            # 缓存结果 (score, reason)
+            result = (score, reason)
+            _relevance_cache[cache_key] = result
+            return result
         except Exception as e:
             if attempt >= MAX_RETRIES + 1:
                 logger.error("相关性打分失败 (query=%s, 已重试%d次): %s", query[:50], MAX_RETRIES, str(e))
-                return -1
+                return (-1, "")
             time.sleep(RETRY_DELAY)
-    return -1
+    return (-1, "")
 
 
 def score_both_parallel(host: str, query: str, title: str, content: str) -> tuple:
     """
     优化2：并行执行权威性和相关性打分
-    返回 (authority_score, relevance_score)
+    返回 (authority_score, authority_reason, relevance_score, relevance_reason)
     """
     with ThreadPoolExecutor(max_workers=2) as executor:
         authority_future = executor.submit(score_authority_cached, host, title, content)
         relevance_future = executor.submit(score_relevance_cached, query, title, content)
 
-        authority_score = authority_future.result()
-        relevance_score = relevance_future.result()
+        authority_score, authority_reason = authority_future.result()
+        relevance_score, relevance_reason = relevance_future.result()
 
-    return authority_score, relevance_score
+    return authority_score, authority_reason, relevance_score, relevance_reason
 
 
 # 类型别名

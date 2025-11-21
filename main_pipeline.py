@@ -64,7 +64,8 @@ def print_statistics(
     """
     # 统计权威性评分分布
     authority_distribution = {1: 0, 2: 0, 3: 0, 4: 0}
-    for score in agent.authority_hosts.values():
+    for info in agent.authority_hosts.values():
+        score = int(info["authority_score"])
         authority_distribution[score] = authority_distribution.get(score, 0) + 1
 
     # 统计相关性评分分布
@@ -191,6 +192,37 @@ def main() -> None:
         help="第三个CSV筛选条件：相关性评分（默认2）",
     )
 
+    # Checkpoint参数
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=0,
+        help="Checkpoint间隔（每N个query保存一次），0表示禁用（默认0）",
+    )
+    parser.add_argument(
+        "--enable-oss-upload",
+        action="store_true",
+        help="是否启用OSS上传checkpoint文件",
+    )
+    parser.add_argument(
+        "--oss-all-results-path",
+        type=str,
+        default="",
+        help="all_results_with_scores的OSS路径",
+    )
+    parser.add_argument(
+        "--oss-authority-hosts-path",
+        type=str,
+        default="",
+        help="authority_hosts的OSS路径",
+    )
+    parser.add_argument(
+        "--oss-filtered-qna-path",
+        type=str,
+        default="",
+        help="filtered_qna的OSS路径",
+    )
+
     args = parser.parse_args()
 
     # 配置日志
@@ -254,6 +286,22 @@ def main() -> None:
     logger.info("  relevance_threshold: %d", pipeline_config.relevance_threshold)
     logger.info("  max_workers: %d", pipeline_config.max_workers)
 
+    # Checkpoint配置
+    if args.checkpoint_interval > 0:
+        logger.info("Checkpoint配置:")
+        logger.info("  checkpoint_interval: %d", args.checkpoint_interval)
+        logger.info("  enable_oss_upload: %s", args.enable_oss_upload)
+        if args.enable_oss_upload:
+            logger.info("  oss_all_results_path: %s", args.oss_all_results_path)
+            logger.info("  oss_authority_hosts_path: %s", args.oss_authority_hosts_path)
+            logger.info("  oss_filtered_qna_path: %s", args.oss_filtered_qna_path)
+
+    oss_paths = {
+        "all_results": args.oss_all_results_path,
+        "authority_hosts": args.oss_authority_hosts_path,
+        "filtered_qna": args.oss_filtered_qna_path,
+    }
+
     agent = AuthorityAgent(
         search_client=search_client,
         storage_client=storage_client,
@@ -263,6 +311,12 @@ def main() -> None:
         max_workers=pipeline_config.max_workers,
         score_authority=default_score_authority,
         score_relevance=default_score_relevance,
+        checkpoint_interval=args.checkpoint_interval,
+        output_dir=args.output_dir,
+        oss_paths=oss_paths,
+        enable_oss_upload=args.enable_oss_upload,
+        filter_authority_score=pipeline_config.filter_authority_score,
+        filter_relevance_score=pipeline_config.filter_relevance_score,
     )
 
     # 处理输入文件
@@ -272,24 +326,47 @@ def main() -> None:
     logger.info("=" * 80)
 
     start_time = time.time()
-    agent.process_inputs(input_paths)
-    elapsed_time = time.time() - start_time
 
-    # 打印统计信息
-    print_statistics(logger, agent, args.date, input_paths, elapsed_time)
+    try:
+        agent.process_inputs(input_paths)
+        elapsed_time = time.time() - start_time
 
-    # 输出CSV文件
-    logger.info("输出CSV文件到: %s", args.output_dir)
-    agent.flush_outputs_csv(
-        output_dir=args.output_dir,
-        filter_authority_score=pipeline_config.filter_authority_score,
-        filter_relevance_score=pipeline_config.filter_relevance_score,
-    )
+        # 打印统计信息
+        print_statistics(logger, agent, args.date, input_paths, elapsed_time)
 
-    logger.info("")
-    logger.info("=" * 80)
-    logger.info("主流程执行完成！")
-    logger.info("=" * 80)
+        # 输出完整的CSV文件（最终结果）
+        logger.info("输出完整CSV文件到: %s", args.output_dir)
+        agent.flush_outputs_csv(
+            output_dir=args.output_dir,
+            filter_authority_score=pipeline_config.filter_authority_score,
+            filter_relevance_score=pipeline_config.filter_relevance_score,
+        )
+
+        logger.info("")
+        logger.info("=" * 80)
+        logger.info("主流程执行完成！")
+        logger.info("=" * 80)
+
+    except KeyboardInterrupt:
+        logger.warning("⚠️  用户中断，保存当前进度...")
+        if args.checkpoint_interval > 0:
+            agent.save_checkpoint(
+                filter_authority_score=pipeline_config.filter_authority_score,
+                filter_relevance_score=pipeline_config.filter_relevance_score,
+            )
+        raise
+    except Exception as e:
+        logger.error("❌ 发生异常: %s", e)
+        if args.checkpoint_interval > 0:
+            logger.info("保存当前进度...")
+            try:
+                agent.save_checkpoint(
+                    filter_authority_score=pipeline_config.filter_authority_score,
+                    filter_relevance_score=pipeline_config.filter_relevance_score,
+                )
+            except Exception as save_error:
+                logger.error("保存进度失败: %s", save_error)
+        raise
 
 
 if __name__ == "__main__":

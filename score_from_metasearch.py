@@ -61,9 +61,10 @@ def score_single_row(row: dict, authority_threshold: int, relevance_threshold: i
     content = row.get("content", "")
     url = row.get("url", "")
     rank = row.get("rank", 0)
+    search_engine = row.get("search_engine", "")
 
-    # 优化2：并行打分
-    authority_score, relevance_score = score_both_parallel(host, query, title, content)
+    # 优化2：并行打分（返回score和reason）
+    authority_score, authority_reason, relevance_score, relevance_reason = score_both_parallel(host, query, title, content)
 
     return {
         "query": query,
@@ -72,8 +73,11 @@ def score_single_row(row: dict, authority_threshold: int, relevance_threshold: i
         "title": title,
         "content": content,
         "host": host,
+        "search_engine": search_engine,
         "authority_score": authority_score,
+        "authority_reason": authority_reason,
         "relevance_score": relevance_score,
+        "relevance_reason": relevance_reason,
     }
 
 
@@ -179,10 +183,15 @@ def main():
             if relevance_score == -1:
                 stats["relevance_score_failed"] += 1
 
-            # 收集权威host
+            # 收集权威host（同时存储score和reason）
             if authority_score >= args.authority_threshold:
-                existing = authority_hosts.get(host, authority_score)
-                authority_hosts[host] = max(existing, authority_score)
+                authority_reason = result["authority_reason"]
+                existing = authority_hosts.get(host)
+                if existing is None or existing["authority_score"] < authority_score:
+                    authority_hosts[host] = {
+                        "authority_score": authority_score,
+                        "authority_reason": authority_reason
+                    }
 
     elapsed_time = time.time() - start_time
 
@@ -201,31 +210,40 @@ def main():
     # 输出CSV文件
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # 文件1：所有结果带评分
+    # 文件1：所有结果带评分（所有字段转为str）
     df_all = pd.DataFrame(all_results_with_scores)
+    df_all = df_all.astype(str)
     csv_path_1 = os.path.join(args.output_dir, "all_results_with_scores.csv")
     df_all.to_csv(csv_path_1, index=False, encoding="utf-8-sig")
     logger.info("✓ 输出文件1: %s (%d 条记录)", csv_path_1, len(df_all))
 
-    # 文件2：权威host列表
+    # 文件2：权威host列表（添加authority_reason，所有字段转为str）
     if authority_hosts:
         df_hosts = pd.DataFrame([
-            {"host": host, "authority_score": score}
-            for host, score in authority_hosts.items()
+            {
+                "host": host,
+                "authority_score": str(info["authority_score"]),
+                "authority_reason": info["authority_reason"]
+            }
+            for host, info in authority_hosts.items()
         ]).sort_values("authority_score", ascending=False)
+        df_hosts = df_hosts.astype(str)
         csv_path_2 = os.path.join(args.output_dir, "authority_hosts.csv")
         df_hosts.to_csv(csv_path_2, index=False, encoding="utf-8-sig")
         logger.info("✓ 输出文件2: %s (%d 个权威host)", csv_path_2, len(df_hosts))
 
-    # 文件3：筛选后的高质量结果
+    # 文件3：筛选后的高质量结果（调整字段顺序，所有字段转为str）
     filtered_results = [
         {
-            "query": rec["query"],
-            "url": rec["url"],
-            "title": rec["title"],
-            "content": rec["content"],
-            "authority_score": rec["authority_score"],
-            "relevance_score": rec["relevance_score"],
+            "query": str(rec["query"]),
+            "url": str(rec["url"]),
+            "content": str(rec["content"]),
+            "title": str(rec["title"]),
+            "authority_score": str(rec["authority_score"]),
+            "relevance_score": str(rec["relevance_score"]),
+            "authority_reason": str(rec["authority_reason"]),
+            "relevance_reason": str(rec["relevance_reason"]),
+            "search_engine": str(rec["search_engine"]),
         }
         for rec in all_results_with_scores
         if rec["authority_score"] == args.filter_authority_score

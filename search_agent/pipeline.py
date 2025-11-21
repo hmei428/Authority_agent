@@ -40,6 +40,7 @@ class AuthorityAgent:
         output_dir: str = "",  # 新增：输出目录
         oss_paths: Optional[Dict[str, str]] = None,  # 新增：OSS路径配置
         enable_oss_upload: bool = False,  # 新增：是否启用OSS上传
+        oss_upload_client: Optional[StorageClient] = None,
         filter_authority_score: int = 4,
         filter_relevance_score: int = 2,
     ) -> None:
@@ -59,6 +60,7 @@ class AuthorityAgent:
         self.output_dir = output_dir
         self.enable_oss_upload = enable_oss_upload
         self.oss_paths = oss_paths or {}
+        self.oss_upload_client = oss_upload_client
 
         self.authority_hosts: Dict[str, Dict[str, str]] = {}  # 修改：存储 {host: {"authority_score": score, "authority_reason": reason}}
         self.qna_records: List[Dict[str, str]] = []
@@ -331,6 +333,9 @@ class AuthorityAgent:
         """上传checkpoint文件到OSS"""
         logger.info(f"☁️  上传 {checkpoint_name} 到OSS...")
 
+        if not self.oss_upload_client:
+            raise RuntimeError("启用了OSS上传，但未配置OSS客户端")
+
         file_mappings = {
             "all_results_with_scores.parquet": self.oss_paths.get("all_results"),
             "authority_hosts.parquet": self.oss_paths.get("authority_hosts"),
@@ -354,7 +359,7 @@ class AuthorityAgent:
                 # 读取本地parquet
                 df = pd.read_parquet(local_file)
                 # 使用storage_client上传
-                self.storage_client.write_parquet(df, oss_file_path)
+                self.oss_upload_client.write_parquet(df, oss_file_path)
                 logger.info(f"    ✓ {filename} → {oss_file_path}")
             except Exception as e:
                 logger.error(f"    ✗ 上传失败 {filename}: {e}")

@@ -248,6 +248,7 @@ def main() -> None:
     )
 
     # 初始化存储客户端
+    oss_upload_client = None
     if args.use_oss:
         logger.info("初始化OSS客户端...")
         oss_config = OssConfig.from_env()
@@ -259,9 +260,22 @@ def main() -> None:
             bucket_name=oss_config.bucket_name,
         )
         logger.info("OSS客户端初始化完成")
+        if args.enable_oss_upload:
+            oss_upload_client = storage_client
     else:
         logger.info("使用本地文件系统")
         storage_client = LocalStorageClient()
+        if args.enable_oss_upload:
+            logger.info("为OSS上传单独初始化客户端...")
+            oss_config = OssConfig.from_env()
+            oss_config.validate()
+            oss_upload_client = OssStorageClient(
+                endpoint=oss_config.endpoint,
+                access_key_id=oss_config.access_key_id,
+                access_key_secret=oss_config.access_key_secret,
+                bucket_name=oss_config.bucket_name,
+            )
+            logger.info("OSS上传客户端初始化完成")
 
     # 查找输入文件
     logger.info("查找输入文件: prefix=%s, date=%s", args.input_prefix, args.date)
@@ -315,6 +329,7 @@ def main() -> None:
         output_dir=args.output_dir,
         oss_paths=oss_paths,
         enable_oss_upload=args.enable_oss_upload,
+        oss_upload_client=oss_upload_client,
         filter_authority_score=pipeline_config.filter_authority_score,
         filter_relevance_score=pipeline_config.filter_relevance_score,
     )

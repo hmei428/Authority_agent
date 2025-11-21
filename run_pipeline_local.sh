@@ -21,6 +21,8 @@ export RELEVANCE_MODEL="${RELEVANCE_MODEL:-qwen3-30b-a3b}"
 export OSS_ENDPOINT="${OSS_ENDPOINT:-https://oss-cn-shanghai-internal.aliyuncs.com}"
 export OSS_ACCESS_KEY_ID="${OSS_ACCESS_KEY_ID:-LTAI4GHNne3HtXvWqsbHX9Gy}"
 export OSS_ACCESS_KEY_SECRET="${OSS_ACCESS_KEY_SECRET:-glXyTIUF4Ywv4HOTo9exGW06wgD9Rq}"
+export OSS_BUCKET="xhs-bigdata-shequ-search"
+
 
 
 # 输入输出配置
@@ -40,7 +42,7 @@ FILTER_RELEVANCE_SCORE="${FILTER_RELEVANCE_SCORE:-2}"
 
 # Checkpoint配置
 CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-50}"  # 默认0表示禁用，可设置为50、100等
-ENABLE_OSS_UPLOAD="${ENABLE_OSS_UPLOAD:-false}"  # 默认不启用OSS上传
+ENABLE_OSS_UPLOAD="${ENABLE_OSS_UPLOAD:-true}"  # 默认不启用OSS上传
 
 # OSS路径配置（仅在ENABLE_OSS_UPLOAD=true时生效）
 # 示例: oss://your-bucket/search-agent/20251120/all_results/

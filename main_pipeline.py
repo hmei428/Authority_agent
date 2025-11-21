@@ -68,15 +68,7 @@ def print_statistics(
         score = int(info["authority_score"])
         authority_distribution[score] = authority_distribution.get(score, 0) + 1
 
-    # 统计相关性评分分布
-    relevance_distribution = {0: 0, 1: 0, 2: 0}
-    for rec in agent.all_results_with_scores:
-        score = rec.get("relevance_score", -1)
-        if score in relevance_distribution:
-            relevance_distribution[score] += 1
-
-    # 统计总query数
-    unique_queries = set(rec["query"] for rec in agent.all_results_with_scores)
+    relevance_distribution = agent.relevance_distribution_total
 
     logger.info("")
     logger.info("=" * 80)
@@ -92,7 +84,8 @@ def print_statistics(
     logger.info("  元搜索失败: %d ⚠️", agent.stats["search_failed"])
     logger.info("  权威性打分失败: %d ⚠️", agent.stats["authority_score_failed"])
     logger.info("  相关性打分失败: %d ⚠️", agent.stats["relevance_score_failed"])
-    logger.info("  总搜索结果数: %d", len(agent.all_results_with_scores))
+    logger.info("  元搜索结果条数: %d", agent.total_metasearch_records)
+    logger.info("  总搜索结果数: %d", agent.total_all_results)
     logger.info("")
     logger.info("权威host统计:")
     logger.info("  总数: %d", len(agent.authority_hosts))
@@ -106,7 +99,7 @@ def print_statistics(
     logger.info("  - 1分(弱相关): %d", relevance_distribution[1])
     logger.info("  - 2分(高相关): %d", relevance_distribution[2])
     logger.info("")
-    logger.info("高权威高相关结果数: %d", len(agent.qna_records))
+    logger.info("高权威高相关结果数: %d", agent.total_qna_records)
     logger.info("=" * 80)
     logger.info("")
 

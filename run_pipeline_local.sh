@@ -17,24 +17,33 @@ export DIRECT_LLM_API_KEY="${DIRECT_LLM_API_KEY:-MAAS680934ffb1a349259ed7beae427
 export DIRECT_LLM_BASE_URL="${DIRECT_LLM_BASE_URL:-http://redservingapi.devops.xiaohongshu.com/v1}"
 export AUTHORITY_MODEL="${AUTHORITY_MODEL:-qwen3-30b-a3b}"
 export RELEVANCE_MODEL="${RELEVANCE_MODEL:-qwen3-30b-a3b}"
-# OSS账号配置
+# OSS账号配置（输出/上传）
 export OSS_ENDPOINT="${OSS_ENDPOINT:-https://oss-cn-shanghai-internal.aliyuncs.com}"
 export OSS_ACCESS_KEY_ID="${OSS_ACCESS_KEY_ID:-LTAI4GHNne3HtXvWqsbHX9Gy}"
 export OSS_ACCESS_KEY_SECRET="${OSS_ACCESS_KEY_SECRET:-glXyTIUF4Ywv4HOTo9exGW06wgD9Rq}"
-export OSS_BUCKET="xhs-bigdata-shequ-search"
+export OSS_BUCKET="${OSS_BUCKET:-xhs-bigdata-shequ-search}"
 
-
+# 输入用的 OSS 账号（可与输出不同）
+export INPUT_OSS_ENDPOINT="${INPUT_OSS_ENDPOINT:-$OSS_ENDPOINT}"
+export INPUT_OSS_ACCESS_KEY_ID="${INPUT_OSS_ACCESS_KEY_ID:-$OSS_ACCESS_KEY_ID}"
+export INPUT_OSS_ACCESS_KEY_SECRET="${INPUT_OSS_ACCESS_KEY_SECRET:-$OSS_ACCESS_KEY_SECRET}"
+export INPUT_OSS_BUCKET="${INPUT_OSS_BUCKET:-xhs-bigdata-swap}"
 
 # 输入输出配置
 INPUT_PREFIX="${INPUT_PREFIX:-./data/input/query_}"
 #INPUT_PREFIX="/Users/meihaojie/Desktop/search_agent/data/input/query_20251120/e2a44915-c39b-11f0-8116-529f74c2253d_0_0_0.parquet"
 OUTPUT_DIR="${OUTPUT_DIR:-./outputs/${DATE}}"
+#选择输入要不要从oss中读取
+DOWNLOAD_INPUT_FROM_OSS="${DOWNLOAD_INPUT_FROM_OSS:-true}"
+DOWNLOAD_INPUT_USE_DATE="${DOWNLOAD_INPUT_USE_DATE:-false}"
+OSS_INPUT_PREFIX="${OSS_INPUT_PREFIX:-oss://xhs-bigdata-swap/user/hadoop/temp_s3/meihaojie_websearch_test_ll_web_query_tianfeng_add_qwen3biaozhu_forjava_leimu}"
+LOCAL_OSS_INPUT_DIR="${LOCAL_OSS_INPUT_DIR:-./data/input/oss_${DATE}}"
 
 # 流程参数
 TOPK="${TOPK:-10}"
 AUTHORITY_THRESHOLD="${AUTHORITY_THRESHOLD:-1}"
 RELEVANCE_THRESHOLD="${RELEVANCE_THRESHOLD:-0}"
-MAX_WORKERS="${MAX_WORKERS:-32}"
+MAX_WORKERS="${MAX_WORKERS:-64}"
 
 # 筛选参数（第三个CSV的筛选条件）
 FILTER_AUTHORITY_SCORE="${FILTER_AUTHORITY_SCORE:-4}"
@@ -60,6 +69,12 @@ echo "========================================================================"
 echo "处理日期: ${DATE}"
 echo "输入前缀: ${INPUT_PREFIX}"
 echo "输出目录: ${OUTPUT_DIR}"
+echo "从OSS下载输入: ${DOWNLOAD_INPUT_FROM_OSS}"
+if [ "${DOWNLOAD_INPUT_FROM_OSS}" = "true" ]; then
+echo "  OSS输入前缀: ${OSS_INPUT_PREFIX}"
+  echo "  本地输入目录: ${LOCAL_OSS_INPUT_DIR}"
+  echo "  按日期筛选: ${DOWNLOAD_INPUT_USE_DATE}"
+fi
 echo "========================================================================"
 echo "API配置:"
 echo "  ZHIPU_API_KEY: ${ZHIPU_API_KEY}"
@@ -90,6 +105,22 @@ echo ""
 # 创建必要的目录
 mkdir -p "${OUTPUT_DIR}"
 mkdir -p ./logs
+
+if [ "${DOWNLOAD_INPUT_FROM_OSS}" = "true" ]; then
+  mkdir -p "${LOCAL_OSS_INPUT_DIR}"
+  echo "开始从OSS下载输入文件..."
+  INPUT_OSS_ENDPOINT="${INPUT_OSS_ENDPOINT}" \
+  INPUT_OSS_ACCESS_KEY_ID="${INPUT_OSS_ACCESS_KEY_ID}" \
+  INPUT_OSS_ACCESS_KEY_SECRET="${INPUT_OSS_ACCESS_KEY_SECRET}" \
+  INPUT_OSS_BUCKET="${INPUT_OSS_BUCKET}" \
+  python3 download_inputs_from_oss.py \
+    --oss-prefix "${OSS_INPUT_PREFIX}" \
+    --date "${DATE}" \
+    --dest-dir "${LOCAL_OSS_INPUT_DIR}" \
+    $([ "${DOWNLOAD_INPUT_USE_DATE}" = "false" ] && echo "--no-date-filter")
+  INPUT_PREFIX="${LOCAL_OSS_INPUT_DIR}"
+  echo "OSS输入下载完成，新的INPUT_PREFIX=${INPUT_PREFIX}"
+fi
 
 # 执行主流程
 echo "开始执行主流程..."

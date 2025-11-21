@@ -17,7 +17,7 @@ class MetaSearchClient:
         self.session.headers.update({"api-key": self.api_key})
 
     def search(self, query: str) -> List[Dict]:
-        search_engine = "search_pro_ms"
+        search_engine = "search_prime"
         data = {
             "search_engine": search_engine,
             "search_query": query,

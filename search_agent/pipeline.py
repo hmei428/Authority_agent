@@ -2,7 +2,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -67,6 +67,13 @@ class AuthorityAgent:
         self.all_results_with_scores: List[Dict] = []  # 新增：存储所有结果带评分
         self.result_rank_counter: Dict[str, int] = {}  # 新增：追踪每个query的结果排序
         self.metasearch_results: List[Dict] = []  # 新增：存储metasearch原始结果（用于后续单独打分）
+        self.authority_hosts_updates: Dict[str, Dict[str, str]] = {}
+        self.qna_seen_keys: Set[Tuple[str, str]] = set()
+        self.csv_part_index = 0
+        self.total_metasearch_records = 0
+        self.total_all_results = 0
+        self.total_qna_records = 0
+        self.relevance_distribution_total = {0: 0, 1: 0, 2: 0}
 
         # 统计信息
         self.stats = {
@@ -85,6 +92,15 @@ class AuthorityAgent:
             os.makedirs(self.checkpoint_dir, exist_ok=True)
         else:
             self.checkpoint_dir = ""
+
+        self._reset_chunk_state()
+
+    def _reset_chunk_state(self) -> None:
+        """清空当前批次缓存，释放内存"""
+        self.metasearch_results = []
+        self.all_results_with_scores = []
+        self.qna_records = []
+        self.authority_hosts_updates = {}
 
     def fetch_results(self, query: str, query_type: Optional[str]) -> List[SearchResult]:
         self.stats["total_queries"] += 1
@@ -116,6 +132,7 @@ class AuthorityAgent:
                 "host": host,
                 "search_engine": search_engine,
             })
+            self.total_metasearch_records += 1
 
             results.append(
                 SearchResult(
@@ -200,23 +217,26 @@ class AuthorityAgent:
             "relevance_score": relevance_score,
             "relevance_reason": relevance_reason,
         })
+        self.total_all_results += 1
+        if relevance_score in self.relevance_distribution_total:
+            self.relevance_distribution_total[relevance_score] += 1
 
         # 收集权威host（同时存储score和reason）
         if authority_score >= self.authority_threshold:
             existing = self.authority_hosts.get(result.host)
             if existing is None or int(existing["authority_score"]) < authority_score:
-                self.authority_hosts[result.host] = {
+                host_entry = {
                     "authority_score": str(authority_score),
                     "authority_reason": authority_reason
                 }
+                self.authority_hosts[result.host] = host_entry
+                self.authority_hosts_updates[result.host] = host_entry
 
             # 收集高权威高相关的结果
             if relevance_score >= self.relevance_threshold:
                 key = (result.query, result.url)
-                # 去重同 query-url 组合
-                if not any(
-                    (rec["query"], rec["url"]) == key for rec in self.qna_records
-                ):
+                if key not in self.qna_seen_keys:
+                    self.qna_seen_keys.add(key)
                     self.qna_records.append(
                         {
                             "query": result.query,
@@ -228,6 +248,7 @@ class AuthorityAgent:
                             "relevance_score": relevance_score,
                         }
                     )
+                    self.total_qna_records += 1
 
     def save_checkpoint(
         self,
@@ -283,14 +304,14 @@ class AuthorityAgent:
             logger.warning("  ⚠️  all_results_with_scores 为空，跳过")
 
         # 文件2: authority_hosts.parquet（添加authority_reason，所有字段转为str）
-        if self.authority_hosts:
+        if self.authority_hosts_updates:
             df_hosts = pd.DataFrame([
                 {
                     "host": host,
                     "authority_score": info["authority_score"],
                     "authority_reason": info["authority_reason"]
                 }
-                for host, info in self.authority_hosts.items()
+                for host, info in self.authority_hosts_updates.items()
             ]).sort_values("authority_score", ascending=False)
             # 将所有字段转换为str类型
             df_hosts = df_hosts.astype(str)
@@ -298,7 +319,7 @@ class AuthorityAgent:
             df_hosts.to_parquet(parquet_path, index=False, engine='pyarrow')
             logger.info(f"  ✓ authority_hosts.parquet ({len(df_hosts)} 个host)")
         else:
-            logger.warning("  ⚠️  authority_hosts 为空，跳过")
+            logger.warning("  ⚠️  本批次 authority_hosts 为空，跳过")
 
         # 文件3: filtered_qna.parquet（调整字段顺序，所有字段转为str）
         if self.all_results_with_scores:
@@ -365,6 +386,91 @@ class AuthorityAgent:
                 logger.error(f"    ✗ 上传失败 {filename}: {e}")
                 raise  # 上传失败则中断
 
+    def _write_csv_part(self, chunk_index: int) -> None:
+        """将当前批次的数据写入分片CSV，并重置缓存"""
+        if not any([self.metasearch_results, self.all_results_with_scores, self.qna_records, self.authority_hosts_updates]):
+            logger.info("当前批次无数据，跳过CSV输出")
+            return
+
+        self.csv_part_index += 1
+        part_suffix = f"_part{self.csv_part_index:03d}.csv"
+        os.makedirs(self.output_dir, exist_ok=True)
+        logger.info("写入CSV分片 #%d (批次索引 %d)", self.csv_part_index, chunk_index)
+
+        # 文件0：metasearch_results
+        if self.metasearch_results:
+            df_metasearch = pd.DataFrame(self.metasearch_results).astype(str)
+            csv_path_0 = os.path.join(self.output_dir, f"metasearch_results{part_suffix}")
+            df_metasearch.to_csv(csv_path_0, index=False, encoding="utf-8-sig")
+            logger.info("✓ 输出分片文件: %s (%d 条记录)", csv_path_0, len(df_metasearch))
+        else:
+            logger.info("当前批次无元搜索结果，跳过metasearch CSV")
+
+        # 文件1：所有结果带评分
+        if self.all_results_with_scores:
+            df_all = pd.DataFrame(self.all_results_with_scores).astype(str)
+            csv_path_1 = os.path.join(self.output_dir, f"all_results_with_scores{part_suffix}")
+            df_all.to_csv(csv_path_1, index=False, encoding="utf-8-sig")
+            logger.info("✓ 输出分片文件: %s (%d 条记录)", csv_path_1, len(df_all))
+        else:
+            logger.info("当前批次无LLM打分结果，跳过all_results CSV")
+
+        # 文件2：权威host列表（使用本批次更新）
+        if self.authority_hosts_updates:
+            df_hosts = pd.DataFrame([
+                {
+                    "host": host,
+                    "authority_score": info["authority_score"],
+                    "authority_reason": info["authority_reason"],
+                }
+                for host, info in self.authority_hosts_updates.items()
+            ]).sort_values("authority_score", ascending=False)
+            df_hosts = df_hosts.astype(str)
+            csv_path_2 = os.path.join(self.output_dir, f"authority_hosts{part_suffix}")
+            df_hosts.to_csv(csv_path_2, index=False, encoding="utf-8-sig")
+            logger.info("✓ 输出分片文件: %s (%d 个host)", csv_path_2, len(df_hosts))
+        else:
+            logger.info("当前批次无新增权威host，跳过authority_hosts CSV")
+
+        # 文件3：筛选后的高质量结果
+        filtered_results = [
+            {
+                "query": str(rec["query"]),
+                "url": str(rec["url"]),
+                "content": str(rec["content"]),
+                "title": str(rec["title"]),
+                "authority_score": str(rec["authority_score"]),
+                "relevance_score": str(rec["relevance_score"]),
+                "authority_reason": str(rec["authority_reason"]),
+                "relevance_reason": str(rec["relevance_reason"]),
+                "search_engine": str(rec["search_engine"]),
+            }
+            for rec in self.all_results_with_scores
+            if rec["authority_score"] == self.filter_authority_score
+            and rec["relevance_score"] == self.filter_relevance_score
+        ]
+
+        if filtered_results:
+            df_filtered = pd.DataFrame(filtered_results)
+            csv_path_3 = os.path.join(self.output_dir, f"filtered_qna{part_suffix}")
+            df_filtered.to_csv(csv_path_3, index=False, encoding="utf-8-sig")
+            logger.info(
+                "✓ 输出分片文件: %s (%d 条记录, 筛选条件: authority_score=%d, relevance_score=%d)",
+                csv_path_3,
+                len(df_filtered),
+                self.filter_authority_score,
+                self.filter_relevance_score,
+            )
+        else:
+            logger.info(
+                "当前批次无符合条件的高质量结果 (authority_score=%d, relevance_score=%d)",
+                self.filter_authority_score,
+                self.filter_relevance_score,
+            )
+
+        # 写完后重置批次缓存
+        self._reset_chunk_state()
+
     def process_dataframe(self, df: pd.DataFrame) -> None:
         from tqdm import tqdm
 
@@ -386,6 +492,7 @@ class AuthorityAgent:
             if not chunk_rows:
                 continue
 
+            self._reset_chunk_state()
             batch_tag = f"(批次 {chunk_index}/{total_chunks})"
             logger.info("阶段1: 开始元搜索 %s，共 %d 个query", batch_tag, len(chunk_rows))
             chunk_search_results: List[SearchResult] = []
@@ -441,9 +548,14 @@ class AuthorityAgent:
 
                 logger.info("✓ LLM打分完成 %s", batch_tag)
 
+            if not chunk_search_results:
+                continue
+
             if self.checkpoint_interval > 0:
                 logger.info("批次处理完成，开始保存Checkpoint %s", batch_tag)
                 self.save_checkpoint()
+
+            self._write_csv_part(chunk_index)
 
     def process_inputs(self, input_paths: List[str]) -> None:
         logger.info("=" * 60)
@@ -472,6 +584,10 @@ class AuthorityAgent:
         logger.info("=" * 60)
 
     def flush_outputs(self, authority_prefix: str, qna_prefix: str, date_str: str) -> None:
+        if self.csv_part_index > 0:
+            logger.info("已按批输出CSV/Parquet分片，flush_outputs跳过汇总输出")
+            return
+
         if authority_prefix:
             authority_path = build_output_path(authority_prefix, date_str, "authority_hosts.parquet")
             df_hosts = pd.DataFrame(
@@ -503,6 +619,13 @@ class AuthorityAgent:
         3. filtered_qna.csv - 筛选后的高质量结果（authority_score=filter_authority_score 且 relevance_score=filter_relevance_score）
         """
         import os
+
+        if self.csv_part_index > 0:
+            logger.info(
+                "已输出 %d 个CSV分片 (metasearch_results_partXXX.csv 等)，跳过最终汇总",
+                self.csv_part_index,
+            )
+            return
 
         os.makedirs(output_dir, exist_ok=True)
 

@@ -2,5 +2,5 @@ pandas
 requests
 tqdm
 pyarrow
-oss2
+oss2  # 如果要直接在代码里访问 OSS，请取消注释并安装
 openai

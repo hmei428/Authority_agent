@@ -12,8 +12,15 @@ set -euo pipefail
 DATE="${DATE:-$(date +%Y%m%d)}"
 #DATE="20251121"
 
+# 是否使用运行ID（默认true，每次运行独立；设为false支持断点续传）
+USE_RUN_ID="${USE_RUN_ID:-true}"
+
 # 运行ID（使用时间戳，确保每次运行独立）
-RUN_ID="${RUN_ID:-$(date +%H%M%S)}"
+if [ "${USE_RUN_ID}" = "true" ]; then
+    RUN_ID="${RUN_ID:-$(date +%H%M%S)}"
+else
+    RUN_ID=""  # 不使用RUN_ID，支持断点续传
+fi
 
 # 元搜索API配置
 export ZHIPU_API_KEY="${ZHIPU_API_KEY:-83834a049770445a912608da03702901}"
@@ -32,13 +39,18 @@ export INPUT_OSS_BUCKET="${INPUT_OSS_BUCKET:-xhs-bigdata-swap}"
 
 # 输入输出配置
 INPUT_PREFIX="${INPUT_PREFIX:-./data/input/query_}"
-OUTPUT_DIR="${OUTPUT_DIR:-./outputs/${DATE}_${RUN_ID}}"
+if [ -n "${RUN_ID}" ]; then
+    OUTPUT_DIR="${OUTPUT_DIR:-./outputs/${DATE}_${RUN_ID}}"
+    LOCAL_OSS_INPUT_DIR="${LOCAL_OSS_INPUT_DIR:-./data/input/oss_${DATE}_${RUN_ID}}"
+else
+    OUTPUT_DIR="${OUTPUT_DIR:-./outputs/${DATE}}"
+    LOCAL_OSS_INPUT_DIR="${LOCAL_OSS_INPUT_DIR:-./data/input/oss_${DATE}}"
+fi
 
 # 选择输入要不要从OSS中读取
 DOWNLOAD_INPUT_FROM_OSS="${DOWNLOAD_INPUT_FROM_OSS:-true}"
 DOWNLOAD_INPUT_USE_DATE="${DOWNLOAD_INPUT_USE_DATE:-false}"
 OSS_INPUT_PREFIX="${OSS_INPUT_PREFIX:-oss://xhs-bigdata-swap/user/hadoop/temp_s3/meihaojie_websearch_input_query_agent_parquet_v2_0_4w}"
-LOCAL_OSS_INPUT_DIR="${LOCAL_OSS_INPUT_DIR:-./data/input/oss_${DATE}_${RUN_ID}}"
 
 # 流程参数
 TOPK="${TOPK:-10}"                    # 每个query返回的搜索结果数
@@ -59,7 +71,11 @@ echo "========================================================================"
 echo "元搜索采集流程 - 无LLM打分版"
 echo "========================================================================"
 echo "处理日期: ${DATE}"
-echo "运行ID: ${RUN_ID}"
+if [ -n "${RUN_ID}" ]; then
+    echo "运行ID: ${RUN_ID} (独立运行模式)"
+else
+    echo "运行ID: 无 (断点续传模式)"
+fi
 echo "输入前缀: ${INPUT_PREFIX}"
 echo "输出目录: ${OUTPUT_DIR}"
 echo "从OSS下载输入: ${DOWNLOAD_INPUT_FROM_OSS}"

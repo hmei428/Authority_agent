@@ -15,8 +15,8 @@ class MetaSearchClient:
         api_key: str,
         request_id: str = "search_prime_agent",
         timeout: int = 15,
-        pool_connections: int = 50,
-        pool_maxsize: int = 50,
+        pool_connections: int = 128,  # 增加连接池数量，支持更高并发
+        pool_maxsize: int = 128,      # 增加每个连接池的最大连接数
     ) -> None:
         self.api_key = api_key
         self.request_id = request_id

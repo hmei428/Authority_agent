@@ -4,6 +4,7 @@
 支持checkpoint和断点续传
 """
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -97,12 +98,26 @@ class MetasearchCollector:
         # 日志
         self.logger = logging.getLogger(__name__)
 
-    def load_progress(self) -> int:
-        """加载进度文件，返回已处理的query数"""
+    def load_progress(self, query_hash: str) -> int:
+        """加载进度文件，返回已处理的query数
+
+        Args:
+            query_hash: 当前query列表的hash值，用于检测输入是否变化
+        """
         if os.path.exists(self.progress_file):
             try:
                 with open(self.progress_file, "r", encoding="utf-8") as f:
                     progress = json.load(f)
+                    saved_hash = progress.get("query_hash", "")
+
+                    # 检查query列表是否变化
+                    if saved_hash != query_hash:
+                        self.logger.warning("⚠️  检测到输入query已变化！")
+                        self.logger.warning("   旧hash: %s", saved_hash[:16] + "...")
+                        self.logger.warning("   新hash: %s", query_hash[:16] + "...")
+                        self.logger.warning("   忽略旧进度，从头开始处理")
+                        return 0
+
                     processed = progress.get("processed_queries", 0)
                     self.logger.info("从checkpoint恢复，已处理 %d 个query", processed)
                     return processed
@@ -110,10 +125,16 @@ class MetasearchCollector:
                 self.logger.warning("读取进度文件失败: %s，从头开始", e)
         return 0
 
-    def save_progress(self, processed_queries: int) -> None:
-        """保存进度"""
+    def save_progress(self, processed_queries: int, query_hash: str = "") -> None:
+        """保存进度
+
+        Args:
+            processed_queries: 已处理的query数量
+            query_hash: query列表的hash值
+        """
         progress = {
             "processed_queries": processed_queries,
+            "query_hash": query_hash,
             "timestamp": datetime.now().isoformat(),
             "stats": self.stats,
         }
@@ -159,8 +180,14 @@ class MetasearchCollector:
         self.stats["total_results"] += len(results)
         return results
 
-    def save_checkpoint(self, start_idx: int, end_idx: int) -> None:
-        """保存checkpoint"""
+    def save_checkpoint(self, start_idx: int, end_idx: int, query_hash: str = "") -> None:
+        """保存checkpoint
+
+        Args:
+            start_idx: 起始索引
+            end_idx: 结束索引
+            query_hash: query列表的hash值
+        """
         if not self.results:
             return
 
@@ -169,6 +196,11 @@ class MetasearchCollector:
         checkpoint_path = os.path.join(self.checkpoint_dir, checkpoint_filename)
 
         df = pd.DataFrame(self.results)
+
+        # 将所有字段转换为string类型（OSS要求）
+        for col in df.columns:
+            df[col] = df[col].astype(str)
+
         df.to_parquet(checkpoint_path, index=False)
         self.logger.info("保存checkpoint: %s (%d条记录)", checkpoint_filename, len(self.results))
 
@@ -182,16 +214,21 @@ class MetasearchCollector:
             except Exception as e:
                 self.logger.warning("上传checkpoint到OSS失败: %s", e)
 
-        # 保存进度
-        self.save_progress(end_idx)
+        # 保存进度（包含query_hash）
+        self.save_progress(end_idx, query_hash)
 
         # 清空当前批次
         self.results = []
 
-    def process_queries(self, queries: List[str]) -> None:
-        """处理query列表"""
-        # 加载进度
-        start_idx = self.load_progress()
+    def process_queries(self, queries: List[str], query_hash: str = "") -> None:
+        """处理query列表
+
+        Args:
+            queries: query列表
+            query_hash: query列表的hash值，用于检测输入是否变化
+        """
+        # 加载进度（检查输入是否变化）
+        start_idx = self.load_progress(query_hash)
 
         if start_idx >= len(queries):
             self.logger.info("所有query已处理完成")
@@ -225,7 +262,7 @@ class MetasearchCollector:
                         if self.checkpoint_interval > 0 and \
                            self.stats["processed_queries"] % self.checkpoint_interval == 0:
                             checkpoint_start = current_idx - self.checkpoint_interval
-                            self.save_checkpoint(checkpoint_start, current_idx)
+                            self.save_checkpoint(checkpoint_start, current_idx, query_hash)
 
                     except Exception as exc:
                         self.logger.error("处理query失败 (query=%s): %s", query, exc)
@@ -235,19 +272,22 @@ class MetasearchCollector:
         # 保存剩余的结果
         if self.results:
             checkpoint_start = current_idx - len(self.results)
-            self.save_checkpoint(checkpoint_start, current_idx)
+            self.save_checkpoint(checkpoint_start, current_idx, query_hash)
 
     def save_final_results(self) -> str:
         """保存最终完整结果"""
-        # 合并所有checkpoint文件
+        # 只合并当前时间戳的checkpoint文件（避免重复合并不同运行的数据）
         all_checkpoints = sorted([
             f for f in os.listdir(self.checkpoint_dir)
-            if f.startswith("metasearch_") and f.endswith(".parquet")
+            if f.startswith("metasearch_")
+            and f.endswith(f"_{self.timestamp}.parquet")  # 只匹配当前时间戳
         ])
 
         if not all_checkpoints:
-            self.logger.warning("没有找到checkpoint文件")
+            self.logger.warning("没有找到当前运行的checkpoint文件（时间戳: %s）", self.timestamp)
             return ""
+
+        self.logger.info("找到 %d 个当前运行的checkpoint文件", len(all_checkpoints))
 
         # 读取并合并
         dfs = []
@@ -255,8 +295,13 @@ class MetasearchCollector:
             checkpoint_path = os.path.join(self.checkpoint_dir, checkpoint_file)
             df = pd.read_parquet(checkpoint_path)
             dfs.append(df)
+            self.logger.info("  - 合并: %s (%d条记录)", checkpoint_file, len(df))
 
         final_df = pd.concat(dfs, ignore_index=True)
+
+        # 将所有字段转换为string类型（OSS要求）
+        for col in final_df.columns:
+            final_df[col] = final_df[col].astype(str)
 
         # 保存到本地（添加时间戳避免覆盖）
         final_parquet_filename = f"metasearch_results_{self.timestamp}.parquet"
@@ -264,14 +309,9 @@ class MetasearchCollector:
         final_df.to_parquet(final_parquet_path, index=False)
         self.logger.info("保存最终结果: %s (%d条记录)", final_parquet_path, len(final_df))
 
-        # 上传到OSS（文件名也包含时间戳）
-        if self.enable_oss_upload and self.oss_upload_client and self.oss_output_path:
-            try:
-                oss_key = self.oss_output_path.rstrip("/") + "/" + final_parquet_filename
-                self.oss_upload_client.write_parquet(final_df, oss_key)
-                self.logger.info("上传最终结果到OSS: %s", oss_key)
-            except Exception as e:
-                self.logger.warning("上传最终结果到OSS失败: %s", e)
+        # 不上传最终文件到OSS（只上传checkpoint，节省存储空间）
+        # 如果需要最终文件，可以从OSS下载checkpoint自行合并
+        self.logger.info("最终合并文件仅保存在本地，不上传到OSS（checkpoint已上传）")
 
         return final_parquet_path
 
@@ -399,7 +439,16 @@ def main() -> None:
             all_queries.extend(queries)
             logger.info("  从 %s 读取 %d 个query", path, len(queries))
 
-    logger.info("总共 %d 个唯一query", len(all_queries))
+    # 对所有文件的query进行全局去重（保持原始顺序）
+    logger.info("去重前总共 %d 个query", len(all_queries))
+    seen = set()
+    all_queries_unique = []
+    for q in all_queries:
+        if q not in seen:
+            seen.add(q)
+            all_queries_unique.append(q)
+    all_queries = all_queries_unique
+    logger.info("去重后总共 %d 个唯一query", len(all_queries))
 
     if not all_queries:
         logger.error("没有找到query，退出")
@@ -427,6 +476,10 @@ def main() -> None:
         oss_upload_client=oss_upload_client,
     )
 
+    # 计算query列表的hash值（用于检测输入变化）
+    query_hash = hashlib.md5("".join(all_queries).encode()).hexdigest()
+    logger.info("Query列表hash: %s", query_hash[:16] + "...")
+
     # 处理query
     logger.info("")
     logger.info("=" * 80)
@@ -436,7 +489,7 @@ def main() -> None:
     start_time = time.time()
 
     try:
-        collector.process_queries(all_queries)
+        collector.process_queries(all_queries, query_hash)
 
         # 保存最终结果
         final_path = collector.save_final_results()
@@ -455,11 +508,11 @@ def main() -> None:
 
     except KeyboardInterrupt:
         logger.warning("⚠️  用户中断，保存当前进度...")
-        collector.save_progress(collector.stats["processed_queries"])
+        collector.save_progress(collector.stats["processed_queries"], query_hash)
         raise
     except Exception as e:
         logger.error("❌ 发生异常: %s", e)
-        collector.save_progress(collector.stats["processed_queries"])
+        collector.save_progress(collector.stats["processed_queries"], query_hash)
         raise
 
 
